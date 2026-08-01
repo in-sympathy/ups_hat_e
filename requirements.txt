@@ -1,0 +1,9 @@
+requests
+
+# Everything below is only needed on a board that has a Pioneer600 HAT
+# stacked on it too - see NOTES.md. Leave these uninstalled everywhere else.
+# spidev
+# Pillow
+# psutil
+# RPi.GPIO      # Pi 4 or earlier
+# rpi-lgpio     # Pi 5 - use this INSTEAD of RPi.GPIO, same import name
