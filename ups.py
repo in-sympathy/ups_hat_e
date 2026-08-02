@@ -414,6 +414,25 @@ def _fit_line(text, font, max_width, draw):
     return text + ".." if text else ""
 
 
+def _get_cpu_temp_c():
+    """CPU temperature in Celsius. Tries the standard Raspberry Pi sysfs
+    path directly first - reliable across kernel/OS versions and doesn't
+    depend on psutil's sensor-name guessing - falling back to psutil's
+    sensors_temperatures() if that path isn't there for some reason."""
+    try:
+        with open("/sys/class/thermal/thermal_zone0/temp") as f:
+            return int(f.read().strip()) / 1000.0
+    except Exception:
+        pass
+    try:
+        for entries in psutil.sensors_temperatures().values():
+            if entries:
+                return entries[0].current
+    except Exception:
+        pass
+    return None
+
+
 def gather_oled_lines(device_name, percent, charging, network_cycle=0):
     """Build the list of text lines to show, plus the index of the network
     line if it's currently alternating between two interfaces (or None if
@@ -427,8 +446,7 @@ def gather_oled_lines(device_name, percent, charging, network_cycle=0):
     gathered independently so one failure doesn't blank out the rest of
     the screen."""
     lines = [
-        f"Host: {device_name}",
-        f"Batt: {percent}% - {'CHG' if charging else 'DIS'}",
+        f"{'Charging' if charging else 'Battery'}: {percent}%",
     ]
     cycling_index = None
 
@@ -458,6 +476,14 @@ def gather_oled_lines(device_name, percent, charging, network_cycle=0):
     try:
         vm = psutil.virtual_memory()
         lines.append(f"RAM: {_fmt_gb(vm.available)}/{_fmt_gb(vm.total)}")
+    except Exception:
+        pass
+
+    try:
+        cpu_load = psutil.cpu_percent(interval=None)
+        cpu_temp = _get_cpu_temp_c()
+        if cpu_temp is not None:
+            lines.append(f"CPU: {cpu_load:.0f}% | {cpu_temp:.0f} \u00b0C")
     except Exception:
         pass
 

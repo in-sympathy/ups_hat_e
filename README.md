@@ -33,7 +33,7 @@ Waveshare's stock demo tells you your battery percentage if you're sitting in fr
 - Desktop popups too — `notify-send` for the headless monitor, native tray balloons for the GUI version
 - Lost/restored are debounced against single noisy I2C reads (a few seconds of confirmation before trusting a state change), so momentary blips don't spam your phone
 
-**Optional Pioneer600 OLED status screen** — hostname, battery %, `wlan0`/`eth0` IP, free RAM, free disk. Auto-detects the HAT on the shared I2C bus and simply does nothing on boards that don't have one — same files deploy unchanged to every board. If both network interfaces are connected, the display cycles between their IPs instead of cramming both on screen at a font size too small to read.
+**Optional Pioneer600 OLED status screen** — battery %, `wlan0`/`eth0` IP, free RAM, CPU load + temperature, free disk. Auto-detects the HAT on the shared I2C bus and simply does nothing on boards that don't have one — same files deploy unchanged to every board. If both network interfaces are connected, the display cycles between their IPs instead of cramming both on screen at a font size too small to read.
 
 **Actually reliable** — a systemd service (auto-installed by `main.sh`) so it survives reboots and desktop logins/logouts alike, non-blocking retry logic for hardware that isn't quite ready yet at boot, and a script that keeps running through transient I2C/network hiccups instead of taking the safety shutdown down with it.
 
@@ -117,7 +117,7 @@ If you'd rather not use a separate file, paste the key directly into the `ALERTZ
 
 | Event | Fires when | Debounced? |
 |---|---|---|
-| Startup status | Every time the script starts (e.g. after a reboot) — reports current state, not a transition | No — reports immediately |
+| Startup status | Every time `ups.py` starts (e.g. after a reboot) — reports current state, not a transition. Sent by `ups.py` only, even if `batteryTray.py` is also running - see note below | No — reports immediately |
 | Mains lost | Transition to running on UPS battery | Yes — ~3 confirmed reads (~6s) |
 | Mains restored | Transition to running on mains power | Yes — ~3 confirmed reads (~6s) |
 | Battery critical | Low-voltage safety shutdown countdown begins | No — fires on the first low reading |
@@ -131,7 +131,7 @@ Alertzy fields for all four events (tune via the constants near the top of eithe
 | Priority | Normal |
 | Group | `RaspberryPi` (shared across all boards — the title tells them apart) |
 
-Desktop popup urgency/icon (independent of the Alertzy fields above, since popups aren't limited the same way):
+Desktop popup urgency/icon (independent of the Alertzy fields above, since popups aren't limited the same way; startup rows apply to `ups.py`'s `notify-send` popup only - see the note below the table above):
 
 | Event | Urgency | Icon |
 |---|---|---|
@@ -148,19 +148,19 @@ Two different mechanisms, because the two scripts run in fundamentally different
 - **`ups.py`** uses `notify-send` (needs `libnotify-bin`) plus a `loginctl` session lookup, since it runs continuously in the background, detached from any desktop login. It only pops something up if a desktop session happens to be active on the board *at that moment* — otherwise it just skips silently, no error.
 - **`batteryTray.py`** uses Qt's own `QSystemTrayIcon.showMessage()` instead, since that script only ever runs while already inside a live desktop session (that's how `battery.sh` launches it) — no session discovery needed there.
 
-If you run both at once (`ups.py` as a background service *and* `batteryTray.py` via desktop autostart), you'll get the same event on both channels while a desktop session happens to be active. Harmless, just not deduplicated.
+If you run both at once (`ups.py` as a background service *and* `batteryTray.py` via desktop autostart), lost/restored/critical events show up on both channels while a desktop session happens to be active — harmless, just not deduplicated. The startup-status notification is the one exception: `batteryTray.py` deliberately does *not* send it, since with desktop auto-login both scripts start around the same moment after every reboot, and independently firing the same "just started up" event from both meant two notifications landing for one actual boot. `ups.py` (systemd, always starts regardless of login state) is the single source for that one now.
 
 ### Pioneer600 OLED display
 
-If a Pioneer600 HAT is also stacked on a board, `ups.py` automatically detects it and shows live status on its SSD1306 OLED: hostname, battery % + charging/discharging, a `wlan0`/`eth0` IP address, available RAM, available disk space. On a board without one, this is a complete no-op — nothing to configure, nothing to disable.
+If a Pioneer600 HAT is also stacked on a board, `ups.py` automatically detects it and shows live status on its SSD1306 OLED: battery % + charging/discharging, a `wlan0`/`eth0` IP address, available RAM, CPU load and temperature, available disk space. On a board without one, this is a complete no-op — nothing to configure, nothing to disable.
 
-**Layout:** `Host: <hostname>` on line 1, `Batt: <pct>% - CHG`/`- DIS` on line 2. Font size adapts to how many lines are active (4 lines when no network is connected, up to 5 when one interface is up), so text isn't cramped when there's less to show. Long hostnames are truncated with `..` rather than overflowing the display.
+**Layout:** line 1 is `Charging: <pct>%` when mains power is present, `Battery: <pct>%` when running off the UPS - then whichever of the network/RAM/CPU/disk lines are available. CPU line reads `CPU: <load>% | <temp> °C`, e.g. `CPU: 35% | 46 °C` — temperature is read directly from `/sys/class/thermal/thermal_zone0/temp` (falling back to `psutil`'s sensor API if that path isn't present), and the whole line is skipped if temperature can't be read rather than showing a partial line. Font size adapts to how many lines are active (4 lines with no network connected, up to 5 with one interface up), so text isn't cramped when there's less to show. Any line too wide for the display (e.g. an unusually long IP address) is truncated with `..` rather than overflowing.
 
 **Both interfaces connected:** rather than showing both `wlan0` and `eth0` permanently (which would force the font down to a size too small to read on the physical 128x64 screen), the display alternates between them every render cycle (~2s), with a trailing `>>>` hint on whichever one's currently shown to indicate another is waiting — shown only when it actually fits; if a longer IP address would overflow the display with the hint added, the hint is dropped rather than truncated, so the IP itself is always shown complete and correct. Tunable via `OLED_NETWORK_CYCLE_INTERVAL` near the other OLED constants in `ups.py` — set it higher (e.g. `3`) for a slower cycle if 2 seconds per address feels too fast to read.
 
 **How detection works:** the OLED itself is SPI, not I2C, and SPI has no bus-scan/ACK mechanism the way I2C does — there's no way to directly "ask" if something is connected the way `ups.py` already does for the UPS HAT itself. Instead, it probes the *same* I2C bus for two other chips that are only present on a Pioneer600: the DS3231 RTC (fixed address `0x68`) or the PCF8574 GPIO expander (`0x20`). If either answers, the whole board — OLED included — is physically stacked there. This probe runs at startup and then again once per poll cycle (non-blocking) for up to ~60 seconds if nothing's found yet, covering boot-time races where the bus isn't fully ready the instant the service starts; once it succeeds, it stops trying.
 
-`spidev`/GPIO/Pillow and `psutil` are independent, separately-optional imports — a board with only one set installed still gets a partial display (hostname/battery show even without `psutil`; network/RAM/disk lines just won't) rather than the whole feature disabling itself.
+`spidev`/GPIO/Pillow and `psutil` are independent, separately-optional imports — a board with only one set installed still gets a partial display (the battery line shows even without `psutil`; network/RAM/CPU/disk lines just won't) rather than the whole feature disabling itself.
 
 ## How it works
 

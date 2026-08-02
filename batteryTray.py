@@ -253,21 +253,18 @@ class MainWindow(QMessageBox):
         if self.candidate_count >= POWER_STATE_CONFIRMATIONS:
             if self.vbus_confirmed is None:
                 # First confirmed reading since startup - record the
-                # baseline AND send a one-off "here's the current state"
-                # notification. Distinct from the lost/restored messages
-                # below since this isn't a transition, just reporting
-                # current status right after starting up.
+                # baseline silently. Deliberately NOT sending a startup
+                # notification here (unlike ups.py) - with desktop
+                # auto-login, this script and ups.py both start around the
+                # same moment after every reboot, and each maintains its
+                # own separate debounce state, so both firing independently
+                # meant two "started up" notifications landing for one
+                # actual boot. ups.py (systemd, always starts regardless of
+                # login state) is the single reliable source for that now;
+                # this tray icon already shows current status continuously
+                # via its icon/tooltip the moment it appears, so a
+                # redundant popup for this specific event added little.
                 self.vbus_confirmed = self.vbus_candidate
-                if self.vbus_confirmed:
-                    popup_title = f"{DEVICE_NAME} - Startup: on MAINS"
-                    alert_msg = f"Started up. Running on mains. Battery at {p}%."
-                    notify(DEVICE_NAME, alert_msg, priority=0)
-                    self.tray_icon.showMessage(popup_title, alert_msg, QSystemTrayIcon.Information, 10000)
-                else:
-                    popup_title = f"{DEVICE_NAME} - Startup: on UPS"
-                    alert_msg = f"Started up. Running on UPS battery ({p}%)."
-                    notify(DEVICE_NAME, alert_msg, priority=0)
-                    self.tray_icon.showMessage(popup_title, alert_msg, QSystemTrayIcon.Warning, 10000)
             elif self.vbus_candidate != self.vbus_confirmed:
                 self.vbus_confirmed = self.vbus_candidate
                 if self.vbus_confirmed:
