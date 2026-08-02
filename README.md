@@ -10,14 +10,30 @@ A customised fork of Waveshare's stock UPS HAT (E) demo scripts, extended with A
 
 Waveshare's stock demo tells you your battery percentage if you're sitting in front of the screen watching it. It doesn't tell you anything once you've walked away — which is exactly when a power outage actually matters. This adds the missing piece: your phone buzzes the moment mains power drops, buzzes again when it's back, and warns you before the board shuts itself down — without changing how the UPS HAT itself is actually monitored or protected.
 
+## Contents
+
+- [Features](#features)
+- [Hardware](#hardware)
+- [What's in this repo](#whats-in-this-repo)
+- [Installation](#installation)
+- [Configuration](#configuration)
+  - [Alertzy account key](#alertzy-account-key)
+  - [Notification events](#notification-events)
+  - [Desktop popups](#desktop-popups)
+  - [Pioneer600 OLED display](#pioneer600-oled-display)
+- [How it works](#how-it-works)
+- [Troubleshooting](#troubleshooting)
+- [Technical notes](#technical-notes)
+- [Credits](#credits)
+
 ## Features
 
-**Notifications** — fires on three events: mains power lost, mains power restored, battery critically low (shutdown imminent)
+**Notifications** — fires on four events: startup status, mains power lost, mains power restored, battery critically low (shutdown imminent)
 - Push notifications via [Alertzy](https://alertzy.app), hostname in the title so multi-board setups stay distinguishable
 - Desktop popups too — `notify-send` for the headless monitor, native tray balloons for the GUI version
-- Debounced against single noisy I2C reads (a few seconds of confirmation before trusting a state change), so momentary blips don't spam your phone
+- Lost/restored are debounced against single noisy I2C reads (a few seconds of confirmation before trusting a state change), so momentary blips don't spam your phone
 
-**Optional Pioneer600 OLED status screen** — hostname, battery %, `wlan0`/`eth0` IP (only shown if actually connected), free RAM, free disk. Auto-detects the HAT on the shared I2C bus and simply does nothing on boards that don't have one — same files deploy unchanged to every board.
+**Optional Pioneer600 OLED status screen** — hostname, battery %, `wlan0`/`eth0` IP, free RAM, free disk. Auto-detects the HAT on the shared I2C bus and simply does nothing on boards that don't have one — same files deploy unchanged to every board. If both network interfaces are connected, the display cycles between their IPs instead of cramming both on screen at a font size too small to read.
 
 **Actually reliable** — a systemd service (auto-installed by `main.sh`) so it survives reboots and desktop logins/logouts alike, non-blocking retry logic for hardware that isn't quite ready yet at boot, and a script that keeps running through transient I2C/network hiccups instead of taking the safety shutdown down with it.
 
@@ -29,7 +45,7 @@ Waveshare's stock demo tells you your battery percentage if you're sitting in fr
 | Waveshare UPS HAT (E) | Yes | The whole reason this exists |
 | Waveshare Pioneer600 | Optional | Only needed for the OLED status screen |
 
-## What's in here
+## What's in this repo
 
 | File | Purpose |
 |---|---|
@@ -39,25 +55,26 @@ Waveshare's stock demo tells you your battery percentage if you're sitting in fr
 | `battery.sh`, `battery.desktop` | XDG autostart plumbing for `batteryTray.py` (Waveshare original, untouched) |
 | `ups-monitor.service` | Reference systemd unit — `main.sh` generates its own with correct paths automatically, this is for manual install |
 | `requirements.txt` | Python dependencies |
-| `alertzy.key` | **Not committed** (gitignored) — your Alertzy account key goes here, see Configuration below |
-| `NOTES.md` | The full technical writeup: every change, every bug found and fixed, troubleshooting |
+| `.gitignore` | Keeps `alertzy.key` (and Python cruft) out of version control |
+| `alertzy.key` | **Not committed** — your Alertzy account key goes here, see [Configuration](#alertzy-account-key) |
 | `images/` | Battery icons for the tray version (Waveshare original) |
 
-## Quick start
+## Installation
 
+**1. Enable the interfaces you need:**
 ```bash
-git clone git@github.com:in-sympathy/ups_hat_e.git
-cd ups_hat_e
-
 sudo raspi-config
 # Interface Options -> I2C -> Yes                 (always needed)
-# Interface Options -> SPI -> Yes                 (only if you have a Pioneer600)
+# Interface Options -> SPI -> Yes                  (only if you have a Pioneer600)
+```
 
+**2. Install the base dependencies:**
+```bash
 sudo apt-get install python3-smbus
 pip install -r requirements.txt --break-system-packages
 ```
 
-**Only if you have a Pioneer600** for the OLED display:
+**3. Only if you have a Pioneer600** for the OLED display:
 ```bash
 pip install spidev Pillow psutil --break-system-packages
 
@@ -65,31 +82,48 @@ pip install spidev Pillow psutil --break-system-packages
 pip install rpi-lgpio --break-system-packages     # Raspberry Pi 5
 pip install RPi.GPIO --break-system-packages      # Pi 4 or earlier
 ```
+Classic `RPi.GPIO` does not work on the Pi 5's GPIO chip at all — `rpi-lgpio` is a drop-in replacement that imports under the exact same name, so no code changes are needed either way.
 
-**Set your Alertzy key** (get one from the [Alertzy](https://alertzy.app) app, Account tab):
-```bash
-echo "your-alertzy-account-key" > alertzy.key
-```
+**4. Set your Alertzy key** — see [Alertzy account key](#alertzy-account-key) below.
 
-**Set it all running:**
+**5. Set it all running:**
 ```bash
 chmod +x main.sh
 ./main.sh
 ```
+That one command installs the desktop tray-icon autostart *and* the systemd service. It's safe to re-run any time (after pulling updates, after moving the folder, or just to double check) — it only changes what's actually missing or out of date, so running it again on a board that's already set up correctly is a clean no-op.
 
-That one command installs the desktop tray-icon autostart *and* the systemd service, and is safe to re-run any time — it only changes what's actually missing or out of date, so running it again on a board that's already set up correctly is a clean no-op.
-
-**Verify:**
+**6. Verify:**
 ```bash
 systemctl status ups-monitor
+systemctl is-enabled ups-monitor
 journalctl -u ups-monitor -f
 ```
+You should see a startup notification arrive on your phone within a few seconds, and `journalctl` should be printing a poll cycle's worth of I2C readings every 2 seconds.
 
 ## Configuration
 
-Both `ups.py` and `batteryTray.py` read the same `alertzy.key` file, so there's exactly one place to update it. No quotes, trailing whitespace is fine. If you'd rather not use a separate file, you can paste the key directly into the `ALERTZY_ACCOUNT_KEY = _load_alertzy_key()` line in either script instead.
+### Alertzy account key
 
-Alertzy notification fields, if you want to tune them (both scripts, same constants near the top):
+Get a key from the [Alertzy](https://alertzy.app) app (Account tab), then:
+```bash
+echo "your-alertzy-account-key" > alertzy.key
+```
+No quotes needed, trailing whitespace is fine — it gets stripped. Both `ups.py` and `batteryTray.py` read the *same* `alertzy.key` file in this folder at startup, so there's exactly one place to update it, not two. `.gitignore` already excludes it, so it's safe to keep this repo in git without the real key ever getting committed.
+
+If you'd rather not use a separate file, paste the key directly into the `ALERTZY_ACCOUNT_KEY = _load_alertzy_key()` line in either script instead — whatever's there takes priority over the file not existing.
+
+### Notification events
+
+| Event | Fires when | Debounced? |
+|---|---|---|
+| Startup status | Every time the script starts (e.g. after a reboot) — reports current state, not a transition | No — reports immediately |
+| Mains lost | Transition to running on UPS battery | Yes — ~3 confirmed reads (~6s) |
+| Mains restored | Transition to running on mains power | Yes — ~3 confirmed reads (~6s) |
+| Battery critical | Low-voltage safety shutdown countdown begins | No — fires on the first low reading |
+
+Alertzy fields for all four events (tune via the constants near the top of either script):
+
 | Field | Value |
 |---|---|
 | Title | hostname |
@@ -97,13 +131,78 @@ Alertzy notification fields, if you want to tune them (both scripts, same consta
 | Priority | Normal |
 | Group | `RaspberryPi` (shared across all boards — the title tells them apart) |
 
-## A few notable things found along the way
+Desktop popup urgency/icon (independent of the Alertzy fields above, since popups aren't limited the same way):
 
-- Waveshare's stock `ups.py` mislabels a status bit in its own print statements — `0x20` is commented as "Discharge state," but the official register manual defines it as **"VBUS is powered."** The opposite meaning. Mains-loss detection here is built on the documented meaning, not the stock comment.
-- The Pioneer600's OLED is SPI, not I2C — but SPI has no bus-scan/ACK mechanism, so presence detection instead probes the board's onboard DS3231 RTC or PCF8574 GPIO expander (both I2C) as a proxy: if either answers, the whole board — OLED included — is physically there.
-- Tray icons under Wayland (labwc, the Bookworm default) use a different protocol than the X11 systray this code was originally written against, and unlike X11, a registration attempt that doesn't land the first time never gets a second try by default — fixed by re-asserting visibility every refresh cycle instead of once at startup.
+| Event | Urgency | Icon |
+|---|---|---|
+| Startup, on mains | Normal | battery-good-charging |
+| Startup, on battery | Critical | dialog-warning |
+| Mains lost | Critical | dialog-warning |
+| Mains restored | Normal | battery-good-charging |
+| Battery critical | Critical | battery-caution |
 
-Full details, plus everything else that got fixed along the way, in [`NOTES.md`](NOTES.md).
+### Desktop popups
+
+Two different mechanisms, because the two scripts run in fundamentally different contexts:
+
+- **`ups.py`** uses `notify-send` (needs `libnotify-bin`) plus a `loginctl` session lookup, since it runs continuously in the background, detached from any desktop login. It only pops something up if a desktop session happens to be active on the board *at that moment* — otherwise it just skips silently, no error.
+- **`batteryTray.py`** uses Qt's own `QSystemTrayIcon.showMessage()` instead, since that script only ever runs while already inside a live desktop session (that's how `battery.sh` launches it) — no session discovery needed there.
+
+If you run both at once (`ups.py` as a background service *and* `batteryTray.py` via desktop autostart), you'll get the same event on both channels while a desktop session happens to be active. Harmless, just not deduplicated.
+
+### Pioneer600 OLED display
+
+If a Pioneer600 HAT is also stacked on a board, `ups.py` automatically detects it and shows live status on its SSD1306 OLED: hostname, battery % + charging/discharging, a `wlan0`/`eth0` IP address, available RAM, available disk space. On a board without one, this is a complete no-op — nothing to configure, nothing to disable.
+
+**Layout:** `Host: <hostname>` on line 1, `Batt: <pct>% - CHG`/`- DIS` on line 2. Font size adapts to how many lines are active (4 lines when no network is connected, up to 5 when one interface is up), so text isn't cramped when there's less to show. Long hostnames are truncated with `..` rather than overflowing the display.
+
+**Both interfaces connected:** rather than showing both `wlan0` and `eth0` permanently (which would force the font down to a size too small to read on the physical 128x64 screen), the display alternates between them every render cycle (~2s), with a trailing `>>>` hint on whichever one's currently shown to indicate another is waiting — shown only when it actually fits; if a longer IP address would overflow the display with the hint added, the hint is dropped rather than truncated, so the IP itself is always shown complete and correct. Tunable via `OLED_NETWORK_CYCLE_INTERVAL` near the other OLED constants in `ups.py` — set it higher (e.g. `3`) for a slower cycle if 2 seconds per address feels too fast to read.
+
+**How detection works:** the OLED itself is SPI, not I2C, and SPI has no bus-scan/ACK mechanism the way I2C does — there's no way to directly "ask" if something is connected the way `ups.py` already does for the UPS HAT itself. Instead, it probes the *same* I2C bus for two other chips that are only present on a Pioneer600: the DS3231 RTC (fixed address `0x68`) or the PCF8574 GPIO expander (`0x20`). If either answers, the whole board — OLED included — is physically stacked there. This probe runs at startup and then again once per poll cycle (non-blocking) for up to ~60 seconds if nothing's found yet, covering boot-time races where the bus isn't fully ready the instant the service starts; once it succeeds, it stops trying.
+
+`spidev`/GPIO/Pillow and `psutil` are independent, separately-optional imports — a board with only one set installed still gets a partial display (hostname/battery show even without `psutil`; network/RAM/disk lines just won't) rather than the whole feature disabling itself.
+
+## How it works
+
+Two entry points, for two different situations:
+
+- **`ups.py`** is the one that matters most — headless, runs as a systemd service, alive 24/7 regardless of whether anyone's logged into a desktop. This is where the safety-critical low-voltage shutdown lives, and where all the notification logic actually runs from.
+- **`batteryTray.py`** is a GUI companion — a system-tray icon with the same notifications, for when you're at a desktop session and want an at-a-glance battery readout without opening a terminal.
+
+Both read `alertzy.key` and fire the same four notification events; running both at once is fine (see [Desktop popups](#desktop-popups) above for the one caveat).
+
+Two deployment mechanisms, matched to how each script needs to run:
+
+- **systemd** (`ups-monitor.service`, auto-installed by `main.sh`) starts unconditionally as soon as Linux boots. This is why `ups.py` uses it — it needs to run before/without any login, the same way the safety shutdown does.
+- **XDG autostart** (`battery.desktop`, also set up by `main.sh`) only starts `batteryTray.py` when a desktop *session* begins — after a login, whether manual or automatic. It does not run "at boot" in the sense of running before any login exists.
+
+`main.sh` sets up both in one run, and is safe to re-run any time — it checks current state (does the systemd unit exist and match the current path? is it enabled? is it running?) before touching anything, so re-running it on an already-correctly-configured board is a clean no-op. If the project folder ever moves, running it again detects the path changed and updates/restarts the service to match.
+
+## Troubleshooting
+
+**Alertzy notifications aren't arriving.** Check `alertzy.key` exists in this folder and actually contains your key (not the placeholder) — `cat alertzy.key`. Check the console/journal output for a line starting with `[Alertzy skipped - ...]`, which tells you exactly why (no key set, `requests` not installed, or a network error with the actual exception).
+
+**OLED shows nothing, but `journalctl` shows no errors either.** Check whether it's even being detected: look for `Pioneer600 presence probe: ... acked at 0x68` (or `0x20`) in the output. If you see `[OLED skipped - Pioneer600 not detected on the I2C bus]` instead, the board genuinely isn't finding the HAT on I2C — check wiring/seating. If you see `[OLED skipped - spidev/RPi.GPIO/Pillow not installed]`, revisit step 3 of Installation.
+
+**OLED works when you run `ups.py` manually, but not after a reboot.** This means the screen, wiring, I2C detection, and SPI driver are all correct — the problem is specifically that `ups.py` isn't actually running at boot, which almost always means the systemd service was never installed. Run `./main.sh`, then check:
+```bash
+systemctl status ups-monitor
+journalctl -u ups-monitor -b
+```
+If status says `could not be found`, `main.sh` hasn't been run yet (or failed partway). If it's enabled and running but the OLED still isn't showing, `journalctl -u ups-monitor -b` will show exactly what happened on the most recent boot, including the specific exception if SPI setup is failing. Worth also confirming the service is running the *current* file, not a stale copy at a different path than the one you've been testing manually:
+```bash
+cat /proc/$(systemctl show -p MainPID --value ups-monitor)/cmdline
+```
+
+**Tray icon (`batteryTray.py`) never appears, even though the process is running.** Check your session type: `echo $XDG_SESSION_TYPE`. If it says `wayland` (the Raspberry Pi OS Bookworm default, via labwc), this is a known category of issue — Wayland compositors use a different tray protocol (StatusNotifierItem over D-Bus) than the older X11 systray mechanism most Qt tray apps, including this one, were originally written against. Unlike X11, a registration attempt that doesn't land the first time isn't automatically retried by default. This is already worked around here — `batteryTray.py` re-asserts tray visibility every refresh cycle instead of once at startup — but if it's still not appearing, check `journalctl --user -f` while the app starts, for anything mentioning D-Bus or StatusNotifierItem.
+
+## Technical notes
+
+A few things found and fixed along the way, for anyone comparing this against the stock demo or Waveshare's other UPS HAT scripts:
+
+- **A mislabeled bit in Waveshare's own demo.** Stock `ups.py` labels register `0x02` bit `0x20` as "Discharge state" in its print statements. The separate [Register Manual](<https://www.waveshare.com/wiki/UPS_HAT_(E)_Register>) defines that same bit as **"VBUS is powered"** — the opposite meaning. The manual is the bit-exact authoritative source, so mains-lost/restored detection here is built on the documented meaning, not the stock comment (see the note above `BIT_VBUS_POWERED` in `ups.py`).
+
+- **The SSD1306 driver structurally mirrors a confirmed-working reference**, not just its init sequence — matching Waveshare's own proven pattern in a few specific ways: `spidev.SpiDev(bus, device)` as a single constructor call rather than the more commonly-documented `SpiDev()` + `.open()` two-step (falls back to the two-step form automatically if a given `spidev` build doesn't support the single-call form); no explicit SPI clock speed override, relying on `spidev`'s own default; commands sent one byte per `writebytes()` call rather than batched into one transaction; and `clear()` + `display()` called once right after `begin()`, matching the proven startup sequence.
 
 ## Credits
 

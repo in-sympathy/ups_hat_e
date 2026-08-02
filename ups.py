@@ -209,6 +209,12 @@ OLED_SPI_DEVICE = 0
 OLED_WIDTH = 128
 OLED_HEIGHT = 64
 PIONEER600_PROBE_ADDRESSES = (0x68, 0x20)  # DS3231, PCF8574
+# When both wlan0 and eth0 are connected at once, showing both permanently
+# forces the font down to a size too small to read on the physical 128x64
+# screen - so instead only one network line is shown at a time, alternating
+# every N render cycles. 1 = switch every cycle (~2s, matches the main
+# loop's poll interval); bump this up if that feels too fast to read.
+OLED_NETWORK_CYCLE_INTERVAL = 1
 
 
 class _SSD1306:
@@ -389,7 +395,9 @@ def _pick_font_size(num_lines):
         return 11
     if num_lines == 5:
         return 10
-    return 8  # 6 lines - both wlan0 and eth0 connected, the tightest case
+    return 8  # 6+ lines - not currently reachable (cycling caps network
+              # lines at one, so 5 is the real max), kept as a safety net
+              # in case a future change adds another line
 
 
 def _fmt_gb(n_bytes):
@@ -406,26 +414,44 @@ def _fit_line(text, font, max_width, draw):
     return text + ".." if text else ""
 
 
-def gather_oled_lines(device_name, percent, charging):
-    """Build the list of text lines to show. WiFi/Ethernet lines are only
-    included if that interface actually has an IPv4 address (i.e. is up and
-    connected) - each field is gathered independently so one failure
-    doesn't blank out the rest of the screen."""
+def gather_oled_lines(device_name, percent, charging, network_cycle=0):
+    """Build the list of text lines to show, plus the index of the network
+    line if it's currently alternating between two interfaces (or None if
+    not) - render_oled() uses that index to add a ">>>" hint if there's
+    room, without this function needing to know about fonts/pixel widths
+    itself. `network_cycle` is an ever-increasing counter (the caller
+    passes in how many render cycles have happened) - when both wlan0 and
+    eth0 are connected, this decides which one gets shown this cycle,
+    alternating between them, rather than showing both permanently and
+    forcing the font down to a size too small to read. Each field is
+    gathered independently so one failure doesn't blank out the rest of
+    the screen."""
     lines = [
         f"Host: {device_name}",
         f"Batt: {percent}% - {'CHG' if charging else 'DIS'}",
     ]
+    cycling_index = None
 
     if not PSUTIL_AVAILABLE:
-        return lines
+        return lines, cycling_index
 
     try:
         addrs = psutil.net_if_addrs()
-        for iface in ("wlan0", "eth0"):
-            ip = next((a.address for a in addrs.get(iface, ())
-                       if a.family == socket.AF_INET), None)
-            if ip:
-                lines.append(f"{iface}: {ip}")
+        wlan0_ip = next((a.address for a in addrs.get("wlan0", ())
+                          if a.family == socket.AF_INET), None)
+        eth0_ip = next((a.address for a in addrs.get("eth0", ())
+                         if a.family == socket.AF_INET), None)
+        if wlan0_ip and eth0_ip:
+            show_wlan0 = (network_cycle // OLED_NETWORK_CYCLE_INTERVAL) % 2 == 0
+            if show_wlan0:
+                lines.append(f"wlan0: {wlan0_ip}")
+            else:
+                lines.append(f"eth0: {eth0_ip}")
+            cycling_index = len(lines) - 1  # the other interface is waiting behind this one
+        elif wlan0_ip:
+            lines.append(f"wlan0: {wlan0_ip}")
+        elif eth0_ip:
+            lines.append(f"eth0: {eth0_ip}")
     except Exception:
         pass
 
@@ -441,16 +467,24 @@ def gather_oled_lines(device_name, percent, charging):
     except Exception:
         pass
 
-    return lines
+    return lines, cycling_index
 
 
-def render_oled(oled_context, device_name, percent, charging):
+def render_oled(oled_context, device_name, percent, charging, network_cycle=0):
     """Draw the current status lines to the display. Raises on failure -
     the caller wraps this in its own try/except so a transient SPI/render
     error can't take down the main monitor loop."""
     disp, image, draw = oled_context
-    lines = gather_oled_lines(device_name, percent, charging)
+    lines, cycling_index = gather_oled_lines(device_name, percent, charging, network_cycle)
     font = _get_font(_pick_font_size(len(lines)))
+    if cycling_index is not None:
+        # Hint that a second interface is connected too and will show up
+        # next cycle - but only if it actually fits. Dropping the hint is
+        # better than truncating into it (or worse, into the IP itself),
+        # which is what would happen if this were just appended blindly.
+        hinted = lines[cycling_index] + " >>>"
+        if draw.textbbox((0, 0), hinted, font=font)[2] <= OLED_WIDTH:
+            lines[cycling_index] = hinted
     draw.rectangle((0, 0, OLED_WIDTH, OLED_HEIGHT), outline=0, fill=0)
     line_height = OLED_HEIGHT // max(len(lines), 1)
     for i, line in enumerate(lines):
@@ -495,6 +529,7 @@ bus = smbus.SMBus(1)
 OLED_INIT_MAX_ATTEMPTS = 30
 oled_init_attempts = 1 if OLED_LIBS_AVAILABLE else OLED_INIT_MAX_ATTEMPTS
 oled_context = init_oled(bus, DEVICE_NAME, oled_init_attempts, OLED_INIT_MAX_ATTEMPTS)
+oled_network_cycle = 0
 
 low = 0
 vbus_confirmed = None    # confirmed mains-power state; None = not established yet
@@ -560,9 +595,25 @@ while True:
         if candidate_count >= POWER_STATE_CONFIRMATIONS:
             if vbus_confirmed is None:
                 # First confirmed reading since startup - record the
-                # baseline silently, don't fire a notification for it.
+                # baseline AND send a one-off "here's the current state"
+                # notification. Deliberately distinct from the lost/restored
+                # messages below: this isn't a transition (there's no way
+                # to know what happened before this process started, e.g.
+                # after a reboot), just reporting current status right
+                # after starting up.
                 vbus_confirmed = vbus_candidate
-                print(f"Initial mains state: {'powered' if vbus_confirmed else 'running on battery'}")
+                if vbus_confirmed:
+                    msg = f"Started up. Running on mains. Battery at {percent}%."
+                    print(msg)
+                    popup_title = f"{DEVICE_NAME} - Startup: on MAINS"
+                    notify(DEVICE_NAME, msg, priority=0)
+                    desktop_notify(popup_title, msg, urgency="normal", icon="battery-good-charging")
+                else:
+                    msg = f"Started up. Running on UPS battery ({percent}%)."
+                    print(msg)
+                    popup_title = f"{DEVICE_NAME} - Startup: on UPS"
+                    notify(DEVICE_NAME, msg, priority=0)
+                    desktop_notify(popup_title, msg, urgency="critical", icon="dialog-warning")
             elif vbus_candidate != vbus_confirmed:
                 vbus_confirmed = vbus_candidate
                 if vbus_confirmed:
@@ -608,8 +659,9 @@ while True:
             oled_context = init_oled(bus, DEVICE_NAME, oled_init_attempts, OLED_INIT_MAX_ATTEMPTS)
 
         if oled_context is not None:
+            oled_network_cycle += 1
             try:
-                render_oled(oled_context, DEVICE_NAME, percent, charging or fast_charging)
+                render_oled(oled_context, DEVICE_NAME, percent, charging or fast_charging, oled_network_cycle)
             except Exception as e:
                 print(f"OLED render failed, skipping this cycle: {e}")
 
