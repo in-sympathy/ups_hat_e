@@ -499,7 +499,7 @@ def gather_oled_lines(device_name, percent, charging, network_cycle=0):
 
     try:
         du = psutil.disk_usage("/")
-        lines.append(f"Disk: {_fmt_gb(du.free)}/{_fmt_gb(du.total)}")
+        lines.append(f"Disk: {_fmt_gb(du.free)} / {_fmt_gb(du.total)}")
     except Exception:
         pass
 
