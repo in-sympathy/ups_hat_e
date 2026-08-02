@@ -629,13 +629,13 @@ while True:
                 # after starting up.
                 vbus_confirmed = vbus_candidate
                 if vbus_confirmed:
-                    msg = f"Started up. Running on mains. Battery at {percent}%."
+                    msg = f"Started up on mains - charging at {percent}%."
                     print(msg)
                     popup_title = f"{DEVICE_NAME} - Startup: on MAINS"
                     notify(DEVICE_NAME, msg, priority=0)
                     desktop_notify(popup_title, msg, urgency="normal", icon="battery-good-charging")
                 else:
-                    msg = f"Started up. Running on UPS battery ({percent}%)."
+                    msg = f"Started up on battery at {percent}%."
                     print(msg)
                     popup_title = f"{DEVICE_NAME} - Startup: on UPS"
                     notify(DEVICE_NAME, msg, priority=0)
