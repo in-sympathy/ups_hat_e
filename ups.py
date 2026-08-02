@@ -643,7 +643,7 @@ while True:
             elif vbus_candidate != vbus_confirmed:
                 vbus_confirmed = vbus_candidate
                 if vbus_confirmed:
-                    msg = f"Mains power restored. Battery at {percent}%."
+                    msg = f"Mains power restored. Charging at {percent}%."
                     print(msg)
                     popup_title = f"{DEVICE_NAME} runs on MAINS"
                     notify(DEVICE_NAME, msg, priority=0)
