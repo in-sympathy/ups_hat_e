@@ -30,7 +30,7 @@ Waveshare's stock demo tells you your battery percentage if you're sitting in fr
 
 **Notifications** — fires on four events: startup status, mains power lost, mains power restored, battery critically low (shutdown imminent)
 - Push notifications via [Alertzy](https://alertzy.app), hostname in the title so multi-board setups stay distinguishable
-- Desktop popups too — `notify-send` for the headless monitor, native tray balloons for the GUI version
+- Desktop popups too, via `notify-send` — all from `ups.py`, the single source for every event (see [How it works](#how-it-works))
 - Lost/restored are debounced against single noisy I2C reads (a few seconds of confirmation before trusting a state change), so momentary blips don't spam your phone
 
 **Optional Pioneer600 OLED status screen** — battery %, `wlan0`/`eth0` IP, free RAM, CPU load + temperature, free disk. Auto-detects the HAT on the shared I2C bus and simply does nothing on boards that don't have one — same files deploy unchanged to every board. If both network interfaces are connected, the display cycles between their IPs instead of cramming both on screen at a font size too small to read.
@@ -50,7 +50,7 @@ Waveshare's stock demo tells you your battery percentage if you're sitting in fr
 | File | Purpose |
 |---|---|
 | `ups.py` | Headless monitor — notifications, safety shutdown, OLED. Runs as a systemd service. |
-| `batteryTray.py` | GUI system-tray version with the same notifications. Autostarts on desktop login. |
+| `batteryTray.py` | GUI system-tray battery readout. Autostarts on desktop login. |
 | `main.sh` | Run this once (and any time after pulling updates) — installs/updates both autostart mechanisms |
 | `battery.sh`, `battery.desktop` | XDG autostart plumbing for `batteryTray.py` (Waveshare original, untouched) |
 | `ups-monitor.service` | Reference systemd unit — `main.sh` generates its own with correct paths automatically, this is for manual install |
@@ -109,20 +109,22 @@ Get a key from the [Alertzy](https://alertzy.app) app (Account tab), then:
 ```bash
 echo "your-alertzy-account-key" > alertzy.key
 ```
-No quotes needed, trailing whitespace is fine — it gets stripped. Both `ups.py` and `batteryTray.py` read the *same* `alertzy.key` file in this folder at startup, so there's exactly one place to update it, not two. `.gitignore` already excludes it, so it's safe to keep this repo in git without the real key ever getting committed.
+No quotes needed, trailing whitespace is fine — it gets stripped. `ups.py` reads this at startup; it's the only script that needs it, since it's the sole source of every notification now (see [How it works](#how-it-works)). `.gitignore` already excludes it, so it's safe to keep this repo in git without the real key ever getting committed.
 
-If you'd rather not use a separate file, paste the key directly into the `ALERTZY_ACCOUNT_KEY = _load_alertzy_key()` line in either script instead — whatever's there takes priority over the file not existing.
+If you'd rather not use a separate file, paste the key directly into the `ALERTZY_ACCOUNT_KEY = _load_alertzy_key()` line in `ups.py` instead — whatever's there takes priority over the file not existing.
 
 ### Notification events
 
 | Event | Fires when | Debounced? |
 |---|---|---|
-| Startup status | Every time `ups.py` starts (e.g. after a reboot) — reports current state, not a transition. Sent by `ups.py` only, even if `batteryTray.py` is also running - see note below | No — reports immediately |
+| Startup status | Every time `ups.py` starts (e.g. after a reboot) — reports current state, not a transition | No — reports immediately |
 | Mains lost | Transition to running on UPS battery | Yes — ~3 confirmed reads (~6s) |
 | Mains restored | Transition to running on mains power | Yes — ~3 confirmed reads (~6s) |
 | Battery critical | Low-voltage safety shutdown countdown begins | No — fires on the first low reading |
 
-Alertzy fields for all four events (tune via the constants near the top of either script):
+All four are sent by `ups.py` only - see [How it works](#how-it-works) for why.
+
+Alertzy fields for all four events (tune via the constants near the top of `ups.py`):
 
 | Field | Value |
 |---|---|
@@ -131,7 +133,7 @@ Alertzy fields for all four events (tune via the constants near the top of eithe
 | Priority | Normal |
 | Group | `RaspberryPi` (shared across all boards — the title tells them apart) |
 
-Desktop popup urgency/icon (independent of the Alertzy fields above, since popups aren't limited the same way; startup rows apply to `ups.py`'s `notify-send` popup only - see the note below the table above):
+Desktop popup urgency/icon - all via `ups.py`'s `notify-send` (independent of the Alertzy fields above, since popups aren't limited the same way):
 
 | Event | Urgency | Icon |
 |---|---|---|
@@ -143,12 +145,9 @@ Desktop popup urgency/icon (independent of the Alertzy fields above, since popup
 
 ### Desktop popups
 
-Two different mechanisms, because the two scripts run in fundamentally different contexts:
+All from `ups.py`, via `notify-send` (needs `libnotify-bin`) plus a `loginctl` session lookup — since it runs continuously in the background, detached from any desktop login, it only pops something up if a desktop session happens to be active on the board *at that moment*, otherwise it just skips silently, no error.
 
-- **`ups.py`** uses `notify-send` (needs `libnotify-bin`) plus a `loginctl` session lookup, since it runs continuously in the background, detached from any desktop login. It only pops something up if a desktop session happens to be active on the board *at that moment* — otherwise it just skips silently, no error.
-- **`batteryTray.py`** uses Qt's own `QSystemTrayIcon.showMessage()` instead, since that script only ever runs while already inside a live desktop session (that's how `battery.sh` launches it) — no session discovery needed there.
-
-If you run both at once (`ups.py` as a background service *and* `batteryTray.py` via desktop autostart), lost/restored/critical events show up on both channels while a desktop session happens to be active — harmless, just not deduplicated. The startup-status notification is the one exception: `batteryTray.py` deliberately does *not* send it, since with desktop auto-login both scripts start around the same moment after every reboot, and independently firing the same "just started up" event from both meant two notifications landing for one actual boot. `ups.py` (systemd, always starts regardless of login state) is the single source for that one now.
+`batteryTray.py` doesn't send any event-driven notifications of its own (Alertzy or popup) - it used to, but with desktop auto-login both scripts end up running continuously side by side, and each independently detecting and notifying on the same hardware transition meant every single event landed twice: once from each process. Rather than deduplicate two overlapping notification systems, `ups.py` (systemd, always running regardless of login state) is simply the one source of truth for all of it now. `batteryTray.py`'s own contribution is its continuously-updating tray icon and tooltip (always-on, not tied to any specific event) and the stock low-battery warning dialog (a modal `QMessageBox`, untouched from Waveshare's original) - both are local, passive/blocking UI rather than a notification channel, so they were never part of the duplication in the first place.
 
 ### Pioneer600 OLED display
 
@@ -167,9 +166,9 @@ If a Pioneer600 HAT is also stacked on a board, `ups.py` automatically detects i
 Two entry points, for two different situations:
 
 - **`ups.py`** is the one that matters most — headless, runs as a systemd service, alive 24/7 regardless of whether anyone's logged into a desktop. This is where the safety-critical low-voltage shutdown lives, and where all the notification logic actually runs from.
-- **`batteryTray.py`** is a GUI companion — a system-tray icon with the same notifications, for when you're at a desktop session and want an at-a-glance battery readout without opening a terminal.
+- **`batteryTray.py`** is a GUI companion — a system-tray icon for when you're at a desktop session and want an at-a-glance battery readout without opening a terminal.
 
-Both read `alertzy.key` and fire the same four notification events; running both at once is fine (see [Desktop popups](#desktop-popups) above for the one caveat).
+`ups.py` reads `alertzy.key` and is the sole source of all four notification events (see [Desktop popups](#desktop-popups) above for why). `batteryTray.py` doesn't send notifications of its own at all - its job is purely the live tray icon/tooltip and the stock low-battery dialog.
 
 Two deployment mechanisms, matched to how each script needs to run:
 

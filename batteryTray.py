@@ -7,13 +7,6 @@ import smbus
 import time
 import logging
 import signal
-import socket
-import threading
-try:
-    import requests
-    REQUESTS_AVAILABLE = True
-except ImportError:
-    REQUESTS_AVAILABLE = False
 import PyQt5
 from PyQt5.QtGui import (
     QIcon,
@@ -40,69 +33,16 @@ logging.basicConfig(format="%(message)s", level=logging.INFO)
 ADDR = 0x2d
 LOW_VOL = 3150 #mV
 
-# ---------------------------------------------------------------------------
-# Alertzy - https://alertzy.app (same setup as ups.py - one alertzy.key file
-# is read by both, so there's only one place to update the key)
-# ---------------------------------------------------------------------------
-def _load_alertzy_key():
-    """Reads the account key from alertzy.key in the same folder as this
-    script, if present. Falls back to the placeholder notify() already
-    treats as "not configured yet" if the file is missing/empty/unreadable."""
-    try:
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-    except NameError:
-        script_dir = os.getcwd()  # matches battery.sh/systemd, which both cd here first
-    key_path = os.path.join(script_dir, "alertzy.key")
-    try:
-        with open(key_path) as f:
-            key = f.read().strip()
-        if key:
-            return key
-    except OSError:
-        pass
-    return "YOUR_ALERTZY_ACCOUNT_KEY_HERE"
-
-
-ALERTZY_ACCOUNT_KEY = _load_alertzy_key()  # or paste your key directly here instead
-ALERTZY_URL = "https://alertzy.app/send"
-DEVICE_NAME = socket.gethostname()
-# All boards share one Alertzy group/folder; the title carries the hostname
-# instead, so individual boards are told apart there.
-ALERTZY_GROUP = "RaspberryPi"
-
 # Register 0x02 BIT5 (0x20) = "VBUS is powered" per Waveshare's Register
-# Manual - see the equivalent note in ups_monitor.py for why this is trusted
-# over the "Discharge state" label the stock code below uses for this bit.
+# Manual - see the equivalent note in ups.py for why this is trusted over
+# the "Discharge state" label the stock code below uses for this bit.
+# Used here purely to track current status for the tray icon's own display
+# (icon/tooltip) - ups.py is the sole notification source now, see the
+# comments further down where the old notify()/showMessage() calls were.
 BIT_VBUS_POWERED = 0x20
 # Consecutive matching 1s Worker ticks required before a power-state change
 # is trusted (3 * 1s = 3s) - filters out a single noisy I2C sample.
 POWER_STATE_CONFIRMATIONS = 3
-
-
-def notify(title, message, priority=0, group=ALERTZY_GROUP):
-    """Send an Alertzy push notification on a background thread, so a slow
-    network call can never freeze the tray icon / UI thread. Never raises."""
-    def _send():
-        if not REQUESTS_AVAILABLE:
-            print(f"[Alertzy skipped - 'requests' not installed, see NOTES.md] {title}: {message}")
-            return
-        if ALERTZY_ACCOUNT_KEY == "YOUR_ALERTZY_ACCOUNT_KEY_HERE":
-            print(f"[Alertzy skipped - no account key set] {title}: {message}")
-            return
-        try:
-            files = {
-                "accountKey": (None, ALERTZY_ACCOUNT_KEY),
-                "title": (None, title),
-                "message": (None, message),
-                "group": (None, group),
-                "priority": (None, str(priority)),
-            }
-            response = requests.post(ALERTZY_URL, files=files, timeout=10)
-            response.raise_for_status()
-        except requests.RequestException as e:
-            print(f"Alertzy notification failed: {e}")
-
-    threading.Thread(target=_send, daemon=True).start()
 
 
 bus = smbus.SMBus(1)
@@ -266,17 +206,14 @@ class MainWindow(QMessageBox):
                 # redundant popup for this specific event added little.
                 self.vbus_confirmed = self.vbus_candidate
             elif self.vbus_candidate != self.vbus_confirmed:
+                # ups.py is the sole notification source for this event too
+                # now, for the same reason as the startup case above: with
+                # both scripts always running (desktop auto-login), each
+                # independently detecting and notifying on the same
+                # transition meant every power event landed twice. Still
+                # tracking the state change itself, since it's what the
+                # tray icon's own continuous status display is built on.
                 self.vbus_confirmed = self.vbus_candidate
-                if self.vbus_confirmed:
-                    popup_title = f"{DEVICE_NAME} runs on MAINS"
-                    alert_msg = f"Mains power restored. Battery at {p}%."
-                    notify(DEVICE_NAME, alert_msg, priority=0)
-                    self.tray_icon.showMessage(popup_title, alert_msg, QSystemTrayIcon.Information, 10000)
-                else:
-                    popup_title = f"{DEVICE_NAME} runs on UPS"
-                    alert_msg = f"Mains power lost. Running on UPS battery ({p}%)."
-                    notify(DEVICE_NAME, alert_msg, priority=0)
-                    self.tray_icon.showMessage(popup_title, alert_msg, QSystemTrayIcon.Warning, 10000)
 
         info2 = "Voltage:    %2.1fV           Capacity:   %dmAh\n" % (v,list3[3])
         info3 = "Current:    %2.2fA          Time To Empty   %d min\n" % (c,list3[4])
@@ -290,10 +227,10 @@ class MainWindow(QMessageBox):
         logging.info(f"{localTime.tm_year:04d}-{localTime.tm_mon:02d}-{localTime.tm_mday:02d} {localTime.tm_hour:02d}:{localTime.tm_min:02d}:{localTime.tm_sec:02d}  {s}")
         if(((list4[0] < LOW_VOL) or (list4[1] < LOW_VOL) or (list4[2] < LOW_VOL) or (list4[3] < LOW_VOL)) and self.charge == 0):
             if(self.msgBox == None):
-                popup_title = f"{DEVICE_NAME} - LOW BATTERY"
-                alert_msg = f"Battery critically low ({p}%). Shutting down in 60s if not charged."
-                notify(DEVICE_NAME, alert_msg, priority=0)
-                self.tray_icon.showMessage(popup_title, alert_msg, QSystemTrayIcon.Critical, 10000)
+                # No notify()/showMessage() here either, same reasoning as
+                # the lost/restored case above - ups.py is the sole
+                # notification source now. The modal dialog below is stock,
+                # unchanged, and remains the local warning mechanism.
                 self.counter = 60
                 self._timer.start(1000)
                 self.msgBox = QMessageBox(QMessageBox.NoIcon,'Battery Warning',"<p><strong>The battery level is below<br>Please connect in the power adapter</strong>")
