@@ -34,6 +34,7 @@ you want Alertzy actually sending pushes.
 import os
 import socket
 import subprocess
+import threading
 import time
 
 try:
@@ -94,28 +95,31 @@ DEVICE_NAME = socket.gethostname()
 
 
 def notify(title, message, priority=0, group=ALERTZY_GROUP):
-    """Send an Alertzy push notification. Never raises - a network hiccup
-    should never be able to take down the monitoring/shutdown loop below."""
-    if not REQUESTS_AVAILABLE:
-        print(f"[Alertzy skipped - 'requests' not installed, see NOTES.md] {title}: {message}")
-        return False
-    if ALERTZY_ACCOUNT_KEY == "YOUR_ALERTZY_ACCOUNT_KEY_HERE":
-        print(f"[Alertzy skipped - no account key set] {title}: {message}")
-        return False
-    try:
-        files = {
-            "accountKey": (None, ALERTZY_ACCOUNT_KEY),
-            "title": (None, title),
-            "message": (None, message),
-            "group": (None, group),
-            "priority": (None, str(priority)),
-        }
-        response = requests.post(ALERTZY_URL, files=files, timeout=10)
-        response.raise_for_status()
-        return True
-    except requests.RequestException as e:
-        print(f"Alertzy notification failed: {e}")
-        return False
+    """Send an Alertzy push notification on a background thread, so a slow
+    or hanging network call (timeout=10 below) can never stall the main
+    loop - including the safety-critical low-voltage check - for however
+    long that takes. Never raises."""
+    def _send():
+        if not REQUESTS_AVAILABLE:
+            print(f"[Alertzy skipped - 'requests' not installed, see NOTES.md] {title}: {message}")
+            return
+        if ALERTZY_ACCOUNT_KEY == "YOUR_ALERTZY_ACCOUNT_KEY_HERE":
+            print(f"[Alertzy skipped - no account key set] {title}: {message}")
+            return
+        try:
+            files = {
+                "accountKey": (None, ALERTZY_ACCOUNT_KEY),
+                "title": (None, title),
+                "message": (None, message),
+                "group": (None, group),
+                "priority": (None, str(priority)),
+            }
+            response = requests.post(ALERTZY_URL, files=files, timeout=10)
+            response.raise_for_status()
+        except requests.RequestException as e:
+            print(f"Alertzy notification failed: {e}")
+
+    threading.Thread(target=_send, daemon=True).start()
 
 
 # ---------------------------------------------------------------------------
@@ -159,26 +163,32 @@ def _find_active_graphical_session():
 
 def desktop_notify(title, message, urgency="normal", icon="dialog-information"):
     """Show a local popup via notify-send, if a desktop session is active on
-    this board right now. Silently skipped when headless - never raises,
-    same philosophy as notify(). Requires libnotify-bin (apt install
-    libnotify-bin) and passwordless sudo for the session's user, same
-    assumption the stock demo already makes for `sudo poweroff`."""
-    session = _find_active_graphical_session()
-    if session is None:
-        print(f"[Desktop notify skipped - no active graphical session] {title}: {message}")
-        return False
-    username, dbus_address, display = session
-    try:
-        subprocess.run(
-            ["sudo", "-u", username, "env",
-             f"DISPLAY={display}", f"DBUS_SESSION_BUS_ADDRESS={dbus_address}",
-             "notify-send", "-u", urgency, "-i", icon, title, message],
-            timeout=5, check=False,
-        )
-        return True
-    except Exception as e:
-        print(f"Desktop notification failed: {e}")
-        return False
+    this board right now, on a background thread - same reasoning as
+    notify() above: session discovery can make several subprocess calls
+    (one loginctl show-session per active session, potentially more than
+    one on a real board), each with its own timeout, and running that
+    synchronously would mean any slowness there stalls the main loop -
+    including the safety-critical low-voltage check - for however long it
+    takes. Never raises. Requires libnotify-bin (apt install libnotify-bin)
+    and passwordless sudo for the session's user, same assumption the stock
+    demo already makes for `sudo poweroff`."""
+    def _send():
+        session = _find_active_graphical_session()
+        if session is None:
+            print(f"[Desktop notify skipped - no active graphical session] {title}: {message}")
+            return
+        username, dbus_address, display = session
+        try:
+            subprocess.run(
+                ["sudo", "-u", username, "env",
+                 f"DISPLAY={display}", f"DBUS_SESSION_BUS_ADDRESS={dbus_address}",
+                 "notify-send", "-u", urgency, "-i", icon, title, message],
+                timeout=5, check=False,
+            )
+        except Exception as e:
+            print(f"Desktop notification failed: {e}")
+
+    threading.Thread(target=_send, daemon=True).start()
 
 
 # ---------------------------------------------------------------------------

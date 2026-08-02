@@ -2,6 +2,36 @@
 echo "user name = ${USER}"
 curPath=$(readlink -f "$(dirname "$0")")
 echo $curPath
+
+# ---------------------------------------------------------------------------
+# I2C (always needed for UPS HAT (E) itself) and SPI (only needed for the
+# optional Pioneer600 OLED, but harmless to enable either way) - checked and
+# enabled automatically via raspi-config's non-interactive mode, so this
+# doesn't need any manual raspi-config menu navigation. get_i2c/get_spi
+# follow standard shell exit-code convention: 0 = already enabled, non-zero
+# = disabled - same convention systemctl is-enabled/is-active use elsewhere
+# in this script.
+# ---------------------------------------------------------------------------
+REBOOT_NEEDED=0
+
+echo ""
+echo "Checking I2C..."
+if sudo raspi-config nonint get_i2c >/dev/null 2>&1; then
+    echo "  Already enabled."
+else
+    echo "  Not enabled - enabling now..."
+    sudo raspi-config nonint do_i2c 0
+    REBOOT_NEEDED=1
+fi
+
+echo "Checking SPI..."
+if sudo raspi-config nonint get_spi >/dev/null 2>&1; then
+    echo "  Already enabled."
+else
+    echo "  Not enabled - enabling now (only strictly needed for a Pioneer600's OLED, but harmless regardless)..."
+    sudo raspi-config nonint do_spi 0
+    REBOOT_NEEDED=1
+fi
 sudo rm -rf /home/${USER}/.config/autostart/battery.desktop
 if [ ! -d "/home/${USER}/.config/autostart" ];then
     sudo mkdir /home/${USER}/.config/autostart
@@ -66,22 +96,40 @@ else
     echo "  Already enabled."
 fi
 
-if systemctl is-active --quiet "${SERVICE_NAME}"; then
-    if [ "${SERVICE_CHANGED}" = "1" ]; then
-        echo "  Already running, but the unit file changed - restarting to pick it up..."
-        sudo systemctl restart "${SERVICE_NAME}"
-    else
-        echo "  Already running."
-    fi
+if [ "${REBOOT_NEEDED}" = "1" ]; then
+    echo "  Skipping start for now - I2C/SPI were just enabled and won't actually"
+    echo "  work until you reboot, so starting it now would just fail. It's"
+    echo "  enabled, though, so it'll start correctly on its own after the reboot."
 else
-    echo "  Not running - starting now..."
-    sudo systemctl start "${SERVICE_NAME}"
+    if systemctl is-active --quiet "${SERVICE_NAME}"; then
+        if [ "${SERVICE_CHANGED}" = "1" ]; then
+            echo "  Already running, but the unit file changed - restarting to pick it up..."
+            sudo systemctl restart "${SERVICE_NAME}"
+        else
+            echo "  Already running."
+        fi
+    else
+        echo "  Not running - starting now..."
+        sudo systemctl start "${SERVICE_NAME}"
+    fi
+
+    sleep 1
+    if systemctl is-active --quiet "${SERVICE_NAME}"; then
+        echo "  ${SERVICE_NAME} is up and running."
+    else
+        echo "  WARNING: ${SERVICE_NAME} does not appear to be running."
+        echo "  Check details with: journalctl -u ${SERVICE_NAME} -b"
+    fi
 fi
 
-sleep 1
-if systemctl is-active --quiet "${SERVICE_NAME}"; then
-    echo "  ${SERVICE_NAME} is up and running."
-else
-    echo "  WARNING: ${SERVICE_NAME} does not appear to be running."
-    echo "  Check details with: journalctl -u ${SERVICE_NAME} -b"
+if [ "${REBOOT_NEEDED}" = "1" ]; then
+    echo ""
+    echo "================================================================"
+    echo "I2C and/or SPI were just enabled for the first time - a reboot"
+    echo "is needed before they'll actually work. Everything above is"
+    echo "already set up and will start correctly on its own once you've"
+    echo "rebooted - no need to run this script again afterward."
+    echo ""
+    echo "    sudo reboot"
+    echo "================================================================"
 fi

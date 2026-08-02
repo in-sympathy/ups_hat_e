@@ -61,20 +61,13 @@ Waveshare's stock demo tells you your battery percentage if you're sitting in fr
 
 ## Installation
 
-**1. Enable the interfaces you need:**
-```bash
-sudo raspi-config
-# Interface Options -> I2C -> Yes                 (always needed)
-# Interface Options -> SPI -> Yes                  (only if you have a Pioneer600)
-```
-
-**2. Install the base dependencies:**
+**1. Install the base dependencies:**
 ```bash
 sudo apt-get install python3-smbus
 pip install -r requirements.txt --break-system-packages
 ```
 
-**3. Only if you have a Pioneer600** for the OLED display:
+**2. Only if you have a Pioneer600** for the OLED display:
 ```bash
 pip install spidev Pillow psutil --break-system-packages
 
@@ -84,16 +77,18 @@ pip install RPi.GPIO --break-system-packages      # Pi 4 or earlier
 ```
 Classic `RPi.GPIO` does not work on the Pi 5's GPIO chip at all — `rpi-lgpio` is a drop-in replacement that imports under the exact same name, so no code changes are needed either way.
 
-**4. Set your Alertzy key** — see [Alertzy account key](#alertzy-account-key) below.
+**3. Set your Alertzy key** — see [Alertzy account key](#alertzy-account-key) below.
 
-**5. Set it all running:**
+**4. Set it all running:**
 ```bash
 chmod +x main.sh
 ./main.sh
 ```
-That one command installs the desktop tray-icon autostart *and* the systemd service. It's safe to re-run any time (after pulling updates, after moving the folder, or just to double check) — it only changes what's actually missing or out of date, so running it again on a board that's already set up correctly is a clean no-op.
+This checks whether I2C and SPI are enabled and turns them on automatically if not (no manual `raspi-config` menu needed), then installs the desktop tray-icon autostart *and* the systemd service. It's safe to re-run any time (after pulling updates, after moving the folder, or just to double check) — it only changes what's actually missing or out of date, so running it again on a board that's already set up correctly is a clean no-op.
 
-**6. Verify:**
+If I2C or SPI had to be turned on for the first time, `main.sh` will tell you a reboot is needed before they'll actually work - everything else is already set up at that point and starts correctly on its own once you've rebooted, no need to run the script again afterward.
+
+**5. Verify:**
 ```bash
 systemctl status ups-monitor
 systemctl is-enabled ups-monitor
@@ -181,7 +176,7 @@ Two deployment mechanisms, matched to how each script needs to run:
 
 **Alertzy notifications aren't arriving.** Check `alertzy.key` exists in this folder and actually contains your key (not the placeholder) — `cat alertzy.key`. Check the console/journal output for a line starting with `[Alertzy skipped - ...]`, which tells you exactly why (no key set, `requests` not installed, or a network error with the actual exception).
 
-**OLED shows nothing, but `journalctl` shows no errors either.** Check whether it's even being detected: look for `Pioneer600 presence probe: ... acked at 0x68` (or `0x20`) in the output. If you see `[OLED skipped - Pioneer600 not detected on the I2C bus]` instead, the board genuinely isn't finding the HAT on I2C — check wiring/seating. If you see `[OLED skipped - spidev/RPi.GPIO/Pillow not installed]`, revisit step 3 of Installation.
+**OLED shows nothing, but `journalctl` shows no errors either.** Check whether it's even being detected: look for `Pioneer600 presence probe: ... acked at 0x68` (or `0x20`) in the output. If you see `[OLED skipped - Pioneer600 not detected on the I2C bus]` instead, the board genuinely isn't finding the HAT on I2C — check wiring/seating. If you see `[OLED skipped - spidev/RPi.GPIO/Pillow not installed]`, revisit step 2 of Installation.
 
 **OLED works when you run `ups.py` manually, but not after a reboot.** This means the screen, wiring, I2C detection, and SPI driver are all correct — the problem is specifically that `ups.py` isn't actually running at boot, which almost always means the systemd service was never installed. Run `./main.sh`, then check:
 ```bash
@@ -198,6 +193,8 @@ cat /proc/$(systemctl show -p MainPID --value ups-monitor)/cmdline
 ## Technical notes
 
 A few things found and fixed along the way, for anyone comparing this against the stock demo or Waveshare's other UPS HAT scripts:
+
+- **`notify()` and `desktop_notify()` run on background threads.** Both make network/subprocess calls with their own timeouts (10s for the Alertzy POST, up to 5s per call for the `loginctl`/`notify-send` session-discovery chain behind desktop popups - potentially several stacked calls on a board with multiple sessions). Backgrounded so a slow or hanging call on either front can never stall the main loop - including the low-voltage safety check - for however long that takes.
 
 - **A mislabeled bit in Waveshare's own demo.** Stock `ups.py` labels register `0x02` bit `0x20` as "Discharge state" in its print statements. The separate [Register Manual](<https://www.waveshare.com/wiki/UPS_HAT_(E)_Register>) defines that same bit as **"VBUS is powered"** — the opposite meaning. The manual is the bit-exact authoritative source, so mains-lost/restored detection here is built on the documented meaning, not the stock comment (see the note above `BIT_VBUS_POWERED` in `ups.py`).
 
