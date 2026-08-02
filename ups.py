@@ -398,10 +398,13 @@ def _get_font(size):
 def _pick_font_size(num_lines):
     """Sizes checked against the default PIL font's actual glyph bounding
     box at each likely line count, so there's always a few pixels of margin
-    rather than an exact pixel-for-pixel fit."""
-    if num_lines <= 3:
-        return 13
-    if num_lines == 4:
+    rather than an exact pixel-for-pixel fit. The <=4 tier used to split at
+    3 lines (font 13) vs 4 (font 11), but realistic 3-line content (Batt +
+    RAM + Disk, no network connected) grew wide enough with proper GB/TB
+    units and spacing that font 13 stopped reliably fitting it - merged
+    into one tier at font 11 rather than risk overflow for a font size
+    difference that's marginal on a screen this small anyway."""
+    if num_lines <= 4:
         return 11
     if num_lines == 5:
         return 10
@@ -410,8 +413,25 @@ def _pick_font_size(num_lines):
               # in case a future change adds another line
 
 
-def _fmt_gb(n_bytes):
-    return f"{n_bytes / (1024 ** 3):.1f}G"
+def _fmt_size(n_bytes):
+    """Human-readable size with the unit scaled to whatever's actually
+    appropriate for the magnitude - MB for a nearly-full disk with only a
+    little space left, GB for a typical SD card, TB for a large attached
+    drive - rather than always forcing everything into GB. Trailing zeros
+    are stripped for clean round numbers (32 GB, not 32.0 GB) while
+    non-round values under 100 keep their one decimal place (14.5 GB) -
+    100+ rounds to a whole number instead, since a decimal adds little
+    useful precision at that scale while costing width that matters on a
+    128px display."""
+    size = float(n_bytes)
+    for unit in ("B", "KB", "MB", "GB", "TB", "PB"):
+        if size < 1024 or unit == "PB":
+            if size >= 100:
+                formatted = f"{size:.0f}"
+            else:
+                formatted = f"{size:.1f}".rstrip("0").rstrip(".")
+            return f"{formatted} {unit}"
+        size /= 1024
 
 
 def _fit_line(text, font, max_width, draw):
@@ -485,7 +505,7 @@ def gather_oled_lines(device_name, percent, charging, network_cycle=0):
 
     try:
         vm = psutil.virtual_memory()
-        lines.append(f"RAM: {_fmt_gb(vm.available)}/{_fmt_gb(vm.total)}")
+        lines.append(f"RAM: {_fmt_size(vm.available)} / {_fmt_size(vm.total)}")
     except Exception:
         pass
 
@@ -499,7 +519,7 @@ def gather_oled_lines(device_name, percent, charging, network_cycle=0):
 
     try:
         du = psutil.disk_usage("/")
-        lines.append(f"Disk: {_fmt_gb(du.free)} / {_fmt_gb(du.total)}")
+        lines.append(f"Disk: {_fmt_size(du.free)} / {_fmt_size(du.total)}")
     except Exception:
         pass
 
